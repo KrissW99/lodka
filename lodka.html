@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Panel Łódki Zanętowej CLOUD PRO</title>
+    
+    <!-- Leaflet (Mapy) -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <!-- Firebase SDK -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+        import { getDatabase, ref, set, onValue, remove, update } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+
+        // TWOJA KONFIGURACJA Z FIREBASE
+        const firebaseConfig = {
+            apiKey: "AIzaSyCpyOjyjMpKh-QOgjFaSmXi8JYmLSrRAkg",
+            authDomain: "lodkazanetowa-39468.firebaseapp.com",
+            projectId: "lodkazanetowa-39468",
+            storageBucket: "lodkazanetowa-39468.firebasestorage.app",
+            messagingSenderId: "629042849170",
+            appId: "1:629042849170:web:bfa0352370b99a2dc18d4b",
+            databaseURL: "https://lodkazanetowa-39468-default-rtdb.europe-west1.firebasedatabase.app"
+        };
+
+        // Inicjalizacja
+        const app = initializeApp(firebaseConfig);
+        const db = getDatabase(app);
+        const wpRef = ref(db, 'waypoints');
+
+        // --- LOGIKA MAPY ---
+        const map = L.map('map').setView([49.7368, 20.7226], 16);
+        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+            attribution: 'Tiles &copy; Esri'
+        }).addTo(map);
+
+        let boatMarker = null;
+        let polyline = null;
+        let currentPos = { lat: 0, lng: 0 };
+        let currentHeading = 0;
+        let activeWaypoint = null;
+        let waypointsData = {}; // Tu trzymamy dane z bazy
+        let markers = {};      // Tu trzymamy obiekty markerów na mapie
+
+        const boatIcon = L.divIcon({
+            html: '<div style="background-color: #00ff88; width: 14px; height: 14px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 10px #00ff88;"></div>',
+            className: '', iconSize: [18, 18]
+        });
+
+        const wpIconNormal = L.divIcon({ html: '<div style="background-color: #ffaa00; width: 12px; height: 12px; border-radius: 50%; border: 2px solid white;"></div>', className: '' });
+        const wpIconActive = L.divIcon({ html: '<div style="background-color: #ff4444; width: 16px; height: 16px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 10px #ff4444;"></div>', className: '' });
+
+        // --- SYNCHRONIZACJA Z BAZĄ (REALTIME) ---
+        onValue(wpRef, (snapshot) => {
+            const data = snapshot.val() || {};
+            waypointsData = data;
+            
+            // Usuń stare markery, których nie ma w nowym zrzucie bazy
+            Object.keys(markers).forEach(id => {
+                if (!data[id]) {
+                    map.removeLayer(markers[id]);
+                    delete markers[id];
+                }
+            });
+
+            // Dodaj lub aktualizuj markery z bazy
+            Object.keys(data).forEach(id => {
+                const wp = data[id];
+                if (!markers[id]) {
+                    markers[id] = L.marker([wp.lat, wp.lng], {icon: wpIconNormal}).addTo(map);
+                    markers[id].on('click', () => selectWaypoint(id));
+                }
+                markers[id].setLatLng([wp.lat, wp.lng]);
+            });
+
+            renderList();
+            updateTargetUI();
+        });
+
+        // --- FUNKCJE OBSŁUGI ---
+        window.addWaypoint = function() {
+            if (currentPos.lat === 0) return alert("Brak GPS! Poczekaj na łódkę.");
+            const id = Date.now().toString(); // Unikalne ID na bazie czasu
+            set(ref(db, 'waypoints/' + id), {
+                id: id,
+                name: "Nowy Cel " + (Object.keys(waypointsData).length + 1),
+                lat: currentPos.lat,
+                lng: currentPos.lng
+            });
+        };
+
+        window.deleteWaypoint = function(id) {
+            if(confirm("Usunąć ten punkt dla wszystkich?")) {
+                remove(ref(db, 'waypoints/' + id));
+                if(activeWaypoint && activeWaypoint.id === id) activeWaypoint = null;
+            }
+        };
+
+        window.editWaypoint = function(id) {
+            const newName = prompt("Nowa nazwa:", waypointsData[id].name);
+            if(newName) {
+                update(ref(db, 'waypoints/' + id), { name: newName });
+            }
+        };
+
+        function selectWaypoint(id) {
+            activeWaypoint = waypointsData[id];
+            Object.keys(markers).forEach(mId => markers[mId].setIcon(wpIconNormal));
+            markers[id].setIcon(wpIconActive);
+            renderList();
+            updateTargetUI();
+        }
+
+        function updateTargetUI() {
+            if (activeWaypoint && currentPos.lat !== 0) {
+                const dist = calculateDistance(currentPos.lat, currentPos.lng, activeWaypoint.lat, activeWaypoint.lng);
+                document.getElementById('valDistance').innerText = dist.toFixed(1);
+                document.getElementById('activeWpLabel').innerText = activeWaypoint.name;
+                
+                if(polyline) map.removeLayer(polyline);
+                polyline = L.polyline([[currentPos.lat, currentPos.lng], [activeWaypoint.lat, activeWaypoint.lng]], {color: '#ff4444', dashArray: '5, 5'}).addTo(map);
+            } else {
+                document.getElementById('valDistance').innerText = "---";
+                document.getElementById('activeWpLabel').innerText = "Brak celu";
+                if(polyline) map.removeLayer(polyline);
+            }
+        }
+
+        function renderList() {
+            const list = document.getElementById('wp-list');
+            list.innerHTML = '';
+            Object.keys(waypointsData).forEach(id => {
+                const wp = waypointsData[id];
+                const activeClass = activeWaypoint && activeWaypoint.id === id ? 'active' : '';
+                list.innerHTML += `
+                    <div class="wp-item ${activeClass}">
+                        <div class="wp-name" onclick="window.selectWaypoint('${id}')">${wp.name}</div>
+                        <button class="btn-icon wp-edit" onclick="window.editWaypoint('${id}')">✏️</button>
+                        <button class="btn-icon wp-delete" onclick="window.deleteWaypoint('${id}')">✖</button>
+                    </div>`;
+            });
+        }
+
+        window.selectWaypoint = selectWaypoint;
+
+        // --- RESZTA LOGIKI (GPS, BT, SYMULACJA) ---
+        function calculateDistance(lat1, lon1, lat2, lon2) {
+            const R = 6371e3;
+            const φ1 = lat1 * Math.PI/180; const φ2 = lat2 * Math.PI/180;
+            const Δφ = (lat2-lat1) * Math.PI/180; const Δλ = (lon2-lon1) * Math.PI/180;
+            const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ/2) * Math.sin(Δλ/2);
+            return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        }
+
+        window.updateDashboard = function(lat, lng, heading, sats) {
+            currentPos = { lat, lng };
+            currentHeading = heading;
+            if (!boatMarker) {
+                boatMarker = L.marker([lat, lng], {icon: boatIcon}).addTo(map);
+                map.setView([lat, lng], 18);
+            } else {
+                boatMarker.setLatLng([lat, lng]);
+            }
+            document.getElementById('valHeading').innerText = heading;
+            document.getElementById('compass-arrow').style.transform = `rotate(${heading}deg)`;
+            document.getElementById('valSats').innerText = sats;
+            updateTargetUI();
+        }
+
+        // Bluetooth i Symulacja (przypisanie do okna dla przycisków HTML)
+        window.startTest = function() {
+            let simLat = 49.7368, simLng = 20.7226, simH = 0;
+            setInterval(() => { simLat += 0.00001; simLng += 0.00002; simH = (simH+5)%360; window.updateDashboard(simLat, simLng, simH, 22); }, 500);
+        };
+    </script>
+
+    <style>
+        :root { --bg-color: #121212; --panel-bg: #1e1e1e; --accent: #00ff88; --danger: #ff4444; --text: #ffffff; --edit: #ffc107; }
+        body, html { margin: 0; padding: 0; height: 100%; width: 100%; font-family: sans-serif; background: var(--bg-color); color: var(--text); display: flex; flex-direction: column; }
+        header { background: var(--panel-bg); padding: 10px; display: flex; gap: 10px; z-index: 1000; }
+        button { border: none; border-radius: 5px; padding: 10px; font-weight: bold; cursor: pointer; }
+        #map { flex-grow: 1; width: 100%; z-index: 1; }
+        #controls { position: absolute; top: 70px; right: 10px; z-index: 1000; width: 180px; display: flex; flex-direction: column; gap: 8px; }
+        .wp-item { background: rgba(30,30,30,0.9); padding: 8px; border-radius: 5px; display: flex; align-items: center; gap: 5px; border: 1px solid #444; }
+        .wp-item.active { border-color: var(--accent); color: var(--accent); }
+        .wp-name { flex-grow: 1; cursor: pointer; font-size: 13px; overflow: hidden; text-overflow: ellipsis; }
+        .btn-icon { padding: 4px 6px; font-size: 12px; }
+        #telemetry { background: var(--panel-bg); padding: 15px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; border-top: 2px solid #333; z-index: 1000; }
+        .data-box { background: #2a2a2a; padding: 8px; border-radius: 5px; text-align: center; }
+        .data-label { font-size: 10px; color: #aaa; text-transform: uppercase; }
+        .data-value { font-size: 20px; font-weight: bold; color: var(--accent); }
+        #compass-arrow { display: inline-block; transition: 0.2s; }
+    </style>
+</head>
+<body>
+    <header>
+        <button style="background: #007bff; color: white; flex-grow: 1;">Połącz (BLE)</button>
+        <button onclick="window.startTest()" style="background: #555; color: white;">Symulacja</button>
+    </header>
+    <div id="controls">
+        <button onclick="window.addWaypoint()" style="background: var(--accent); color: #000;">+ Zapisz Cel</button>
+        <div id="wp-list"></div>
+    </div>
+    <div id="map"></div>
+    <div id="telemetry">
+        <div class="data-box"><div class="data-label">Do celu</div><div class="data-value"><span id="valDistance">---</span>m</div><div id="activeWpLabel" style="font-size: 10px;">Brak</div></div>
+        <div class="data-box"><div class="data-label">Kurs</div><div class="data-value"><span id="compass-arrow">↑</span> <span id="valHeading">0</span>°</div></div>
+        <div class="data-box"><div class="data-label">Sats</div><div class="data-value" id="valSats">--</div></div>
+    </div>
+</body>
+</html>
