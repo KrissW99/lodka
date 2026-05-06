@@ -25,7 +25,7 @@
             databaseURL: "https://lodkazanetowa-39468-default-rtdb.europe-west1.firebasedatabase.app"
         };
 
-        // Inicjalizacja
+        // Inicjalizacja Firebase
         const app = initializeApp(firebaseConfig);
         const db = getDatabase(app);
         const wpRef = ref(db, 'waypoints');
@@ -41,8 +41,8 @@
         let currentPos = { lat: 0, lng: 0 };
         let currentHeading = 0;
         let activeWaypoint = null;
-        let waypointsData = {}; // Tu trzymamy dane z bazy
-        let markers = {};      // Tu trzymamy obiekty markerów na mapie
+        let waypointsData = {}; 
+        let markers = {};      
 
         const boatIcon = L.divIcon({
             html: '<div style="background-color: #00ff88; width: 14px; height: 14px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 10px #00ff88;"></div>',
@@ -57,7 +57,6 @@
             const data = snapshot.val() || {};
             waypointsData = data;
             
-            // Usuń stare markery, których nie ma w nowym zrzucie bazy
             Object.keys(markers).forEach(id => {
                 if (!data[id]) {
                     map.removeLayer(markers[id]);
@@ -65,12 +64,11 @@
                 }
             });
 
-            // Dodaj lub aktualizuj markery z bazy
             Object.keys(data).forEach(id => {
                 const wp = data[id];
                 if (!markers[id]) {
                     markers[id] = L.marker([wp.lat, wp.lng], {icon: wpIconNormal}).addTo(map);
-                    markers[id].on('click', () => selectWaypoint(id));
+                    markers[id].on('click', () => window.selectWaypoint(id));
                 }
                 markers[id].setLatLng([wp.lat, wp.lng]);
             });
@@ -79,13 +77,16 @@
             updateTargetUI();
         });
 
-        // --- FUNKCJE OBSŁUGI ---
+        // --- FUNKCJE PUBLICZNE (PRZYPIĘTE DO WINDOW) ---
         window.addWaypoint = function() {
-            if (currentPos.lat === 0) return alert("Brak GPS! Poczekaj na łódkę.");
-            const id = Date.now().toString(); // Unikalne ID na bazie czasu
+            if (currentPos.lat === 0) {
+                alert("Brak sygnału GPS! Najpierw odpal symulację lub połącz się z łódką.");
+                return;
+            }
+            const id = Date.now().toString();
             set(ref(db, 'waypoints/' + id), {
                 id: id,
-                name: "Nowy Cel " + (Object.keys(waypointsData).length + 1),
+                name: "Punkt " + (Object.keys(waypointsData).length + 1),
                 lat: currentPos.lat,
                 lng: currentPos.lng
             });
@@ -105,14 +106,72 @@
             }
         };
 
-        function selectWaypoint(id) {
+        window.selectWaypoint = function(id) {
             activeWaypoint = waypointsData[id];
             Object.keys(markers).forEach(mId => markers[mId].setIcon(wpIconNormal));
-            markers[id].setIcon(wpIconActive);
+            if(markers[id]) markers[id].setIcon(wpIconActive);
             renderList();
             updateTargetUI();
-        }
+        };
 
+        window.updateDashboard = function(lat, lng, heading, sats) {
+            currentPos = { lat, lng };
+            currentHeading = heading;
+            if (!boatMarker) {
+                boatMarker = L.marker([lat, lng], {icon: boatIcon}).addTo(map);
+                map.setView([lat, lng], 18);
+            } else {
+                boatMarker.setLatLng([lat, lng]);
+            }
+            document.getElementById('valHeading').innerText = heading;
+            document.getElementById('compass-arrow').style.transform = `rotate(${heading}deg)`;
+            document.getElementById('valSats').innerText = sats;
+            updateTargetUI();
+        };
+
+        // --- BLUETOOTH BLE ---
+        const BLE_SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+        const BLE_RX_UUID = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+
+        window.connectBluetooth = async function() {
+            try {
+                console.log("Szukam łódki...");
+                const device = await navigator.bluetooth.requestDevice({
+                    filters: [{ namePrefix: 'LODKA' }],
+                    optionalServices: [BLE_SERVICE_UUID]
+                });
+                
+                const server = await device.gatt.connect();
+                const service = await server.getPrimaryService(BLE_SERVICE_UUID);
+                const characteristic = await service.getCharacteristic(BLE_RX_UUID);
+                
+                characteristic.startNotifications();
+                characteristic.addEventListener('characteristicvaluechanged', (event) => {
+                    const value = new TextDecoder().decode(event.target.value);
+                    const data = value.split(',');
+                    if(data.length === 4) {
+                        window.updateDashboard(parseFloat(data[0]), parseFloat(data[1]), parseInt(data[2]), parseInt(data[3]));
+                    }
+                });
+                
+                document.getElementById('btnBLE').innerText = "POŁĄCZONO";
+                document.getElementById('btnBLE').style.background = "var(--accent)";
+            } catch (error) {
+                console.log("BT Error:", error);
+                if(error.name !== 'NotFoundError') alert("Błąd Bluetooth: " + error.message);
+            }
+        };
+
+        window.startTest = function() {
+            console.log("Start symulacji...");
+            let simLat = 49.7368, simLng = 20.7226, simH = 0;
+            setInterval(() => { 
+                simLat += 0.00001; simLng += 0.00002; simH = (simH+5)%360; 
+                window.updateDashboard(simLat, simLng, simH, 22); 
+            }, 500);
+        };
+
+        // --- POMOCNICZE ---
         function updateTargetUI() {
             if (activeWaypoint && currentPos.lat !== 0) {
                 const dist = calculateDistance(currentPos.lat, currentPos.lng, activeWaypoint.lat, activeWaypoint.lng);
@@ -126,6 +185,14 @@
                 document.getElementById('activeWpLabel').innerText = "Brak celu";
                 if(polyline) map.removeLayer(polyline);
             }
+        }
+
+        function calculateDistance(lat1, lon1, lat2, lon2) {
+            const R = 6371e3;
+            const φ1 = lat1 * Math.PI/180; const φ2 = lat2 * Math.PI/180;
+            const Δφ = (lat2-lat1) * Math.PI/180; const Δλ = (lon2-lon1) * Math.PI/180;
+            const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ/2) * Math.sin(Δλ/2);
+            return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
         }
 
         function renderList() {
@@ -142,72 +209,53 @@
                     </div>`;
             });
         }
-
-        window.selectWaypoint = selectWaypoint;
-
-        // --- RESZTA LOGIKI (GPS, BT, SYMULACJA) ---
-        function calculateDistance(lat1, lon1, lat2, lon2) {
-            const R = 6371e3;
-            const φ1 = lat1 * Math.PI/180; const φ2 = lat2 * Math.PI/180;
-            const Δφ = (lat2-lat1) * Math.PI/180; const Δλ = (lon2-lon1) * Math.PI/180;
-            const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ/2) * Math.sin(Δλ/2);
-            return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-        }
-
-        window.updateDashboard = function(lat, lng, heading, sats) {
-            currentPos = { lat, lng };
-            currentHeading = heading;
-            if (!boatMarker) {
-                boatMarker = L.marker([lat, lng], {icon: boatIcon}).addTo(map);
-                map.setView([lat, lng], 18);
-            } else {
-                boatMarker.setLatLng([lat, lng]);
-            }
-            document.getElementById('valHeading').innerText = heading;
-            document.getElementById('compass-arrow').style.transform = `rotate(${heading}deg)`;
-            document.getElementById('valSats').innerText = sats;
-            updateTargetUI();
-        }
-
-        // Bluetooth i Symulacja (przypisanie do okna dla przycisków HTML)
-        window.startTest = function() {
-            let simLat = 49.7368, simLng = 20.7226, simH = 0;
-            setInterval(() => { simLat += 0.00001; simLng += 0.00002; simH = (simH+5)%360; window.updateDashboard(simLat, simLng, simH, 22); }, 500);
-        };
     </script>
 
     <style>
         :root { --bg-color: #121212; --panel-bg: #1e1e1e; --accent: #00ff88; --danger: #ff4444; --text: #ffffff; --edit: #ffc107; }
-        body, html { margin: 0; padding: 0; height: 100%; width: 100%; font-family: sans-serif; background: var(--bg-color); color: var(--text); display: flex; flex-direction: column; }
-        header { background: var(--panel-bg); padding: 10px; display: flex; gap: 10px; z-index: 1000; }
-        button { border: none; border-radius: 5px; padding: 10px; font-weight: bold; cursor: pointer; }
+        body, html { margin: 0; padding: 0; height: 100%; width: 100%; font-family: sans-serif; background: var(--bg-color); color: var(--text); display: flex; flex-direction: column; overflow: hidden; }
+        header { background: var(--panel-bg); padding: 10px; display: flex; gap: 10px; z-index: 1000; box-shadow: 0 2px 10px rgba(0,0,0,0.5); }
+        button { border: none; border-radius: 5px; padding: 12px; font-weight: bold; cursor: pointer; text-transform: uppercase; }
         #map { flex-grow: 1; width: 100%; z-index: 1; }
-        #controls { position: absolute; top: 70px; right: 10px; z-index: 1000; width: 180px; display: flex; flex-direction: column; gap: 8px; }
-        .wp-item { background: rgba(30,30,30,0.9); padding: 8px; border-radius: 5px; display: flex; align-items: center; gap: 5px; border: 1px solid #444; }
-        .wp-item.active { border-color: var(--accent); color: var(--accent); }
-        .wp-name { flex-grow: 1; cursor: pointer; font-size: 13px; overflow: hidden; text-overflow: ellipsis; }
-        .btn-icon { padding: 4px 6px; font-size: 12px; }
+        #controls { position: absolute; top: 80px; right: 10px; z-index: 1000; width: 180px; display: flex; flex-direction: column; gap: 8px; }
+        .wp-item { background: rgba(30,30,30,0.9); padding: 8px; border-radius: 5px; display: flex; align-items: center; gap: 5px; border: 1px solid #444; backdrop-filter: blur(4px); }
+        .wp-item.active { border-color: var(--accent); color: var(--accent); background: rgba(0,255,136,0.1); }
+        .wp-name { flex-grow: 1; cursor: pointer; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .btn-icon { padding: 4px 8px; font-size: 12px; }
         #telemetry { background: var(--panel-bg); padding: 15px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; border-top: 2px solid #333; z-index: 1000; }
         .data-box { background: #2a2a2a; padding: 8px; border-radius: 5px; text-align: center; }
-        .data-label { font-size: 10px; color: #aaa; text-transform: uppercase; }
+        .data-label { font-size: 10px; color: #aaa; margin-bottom: 4px; }
         .data-value { font-size: 20px; font-weight: bold; color: var(--accent); }
         #compass-arrow { display: inline-block; transition: 0.2s; }
     </style>
 </head>
 <body>
     <header>
-        <button style="background: #007bff; color: white; flex-grow: 1;">Połącz (BLE)</button>
+        <button id="btnBLE" onclick="window.connectBluetooth()" style="background: #007bff; color: white; flex-grow: 1;">Połącz (BLE)</button>
         <button onclick="window.startTest()" style="background: #555; color: white;">Symulacja</button>
     </header>
+    
     <div id="controls">
-        <button onclick="window.addWaypoint()" style="background: var(--accent); color: #000;">+ Zapisz Cel</button>
+        <button onclick="window.addWaypoint()" style="background: var(--accent); color: #000; width: 100%;">+ Zapisz Cel</button>
         <div id="wp-list"></div>
     </div>
+
     <div id="map"></div>
+
     <div id="telemetry">
-        <div class="data-box"><div class="data-label">Do celu</div><div class="data-value"><span id="valDistance">---</span>m</div><div id="activeWpLabel" style="font-size: 10px;">Brak</div></div>
-        <div class="data-box"><div class="data-label">Kurs</div><div class="data-value"><span id="compass-arrow">↑</span> <span id="valHeading">0</span>°</div></div>
-        <div class="data-box"><div class="data-label">Sats</div><div class="data-value" id="valSats">--</div></div>
+        <div class="data-box">
+            <div class="data-label">Do celu</div>
+            <div class="data-value"><span id="valDistance">---</span>m</div>
+            <div id="activeWpLabel" style="font-size: 10px; color: #888;">Brak celu</div>
+        </div>
+        <div class="data-box">
+            <div class="data-label">Kurs</div>
+            <div class="data-value"><span id="compass-arrow">↑</span> <span id="valHeading">0</span>°</div>
+        </div>
+        <div class="data-box">
+            <div class="data-label">Sats</div>
+            <div class="data-value" id="valSats">--</div>
+        </div>
     </div>
 </body>
 </html>
